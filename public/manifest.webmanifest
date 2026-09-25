@@ -1,0 +1,13 @@
+{
+  "name": "Тренировка",
+  "short_name": "Тренировка",
+  "description": "Персональный трекер домашних тренировок",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d1210",
+  "theme_color": "#111714",
+  "lang": "ru",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

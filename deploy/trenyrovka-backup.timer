@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Trenyrovka backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00 Europe/Oslo
+RandomizedDelaySec=20m
+Persistent=true
+Unit=trenyrovka-backup.service
+
+[Install]
+WantedBy=timers.target
