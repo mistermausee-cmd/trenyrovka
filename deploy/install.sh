@@ -129,14 +129,56 @@ snapshot_and_backup_existing() {
   fi
 }
 
+valid_ipv4() {
+  local ip="$1" a b c d extra part
+  IFS='.' read -r a b c d extra <<< "$ip"
+  [[ -z "${extra:-}" && -n "${a:-}" && -n "${b:-}" && -n "${c:-}" && -n "${d:-}" ]] || return 1
+  for part in "$a" "$b" "$c" "$d"; do
+    [[ "$part" =~ ^[0-9]{1,3}$ ]] || return 1
+    (( 10#$part <= 255 )) || return 1
+  done
+}
+
+detect_public_ipv4() {
+  local ip=""
+  # Azure Instance Metadata Service is link-local and does not expose credentials here.
+  ip="$(curl --noproxy '*' -fsS --connect-timeout 3 --max-time 5 \
+    -H 'Metadata: true' \
+    'http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text' 2>/dev/null || true)"
+  ip="${ip//$'\r'/}"; ip="${ip//$'\n'/}"
+  if ! valid_ipv4 "$ip"; then
+    ip="$(curl -4 -fsS --connect-timeout 5 --max-time 10 https://api.ipify.org 2>/dev/null || true)"
+    ip="${ip//$'\r'/}"; ip="${ip//$'\n'/}"
+  fi
+  valid_ipv4 "$ip" || die "Не удалось автоматически определить публичный IPv4. Передайте TRENYROVKA_SITE_ADDRESS=ваш_IP."
+  printf '%s' "$ip"
+}
+
+resolve_site_input() {
+  local default_value="${1:-}"
+  if [[ -n "${TRENYROVKA_SITE_ADDRESS:-}" ]]; then
+    printf '%s' "$TRENYROVKA_SITE_ADDRESS"
+  elif [[ "${TRENYROVKA_AUTO_IP:-0}" == '1' ]]; then
+    detect_public_ipv4
+  else
+    prompt_tty 'Домен или публичный IPv4' "$default_value"
+  fi
+}
+
 parse_site() {
-  local input="$1"
+  local input="$1" candidate
   [[ -n "$input" ]] || die "Домен или IP обязателен."
   [[ "$input" =~ ^(https?://)?[A-Za-z0-9.-]+$ ]] || die "Допустим только домен или IPv4 без пути и порта."
-  if [[ "$input" == http://* ]]; then SITE_ADDRESS_VALUE="$input"; COOKIE_SECURE_VALUE=false
-  elif [[ "$input" == https://* ]]; then SITE_ADDRESS_VALUE="${input#https://}"; COOKIE_SECURE_VALUE=true
-  elif [[ "$input" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ || "$input" == 'localhost' ]]; then SITE_ADDRESS_VALUE="http://${input}"; COOKIE_SECURE_VALUE=false
-  else SITE_ADDRESS_VALUE="$input"; COOKIE_SECURE_VALUE=true
+  candidate="${input#http://}"; candidate="${candidate#https://}"
+
+  if [[ "$input" == http://* ]]; then
+    SITE_ADDRESS_VALUE="$input"; COOKIE_SECURE_VALUE=false; CADDYFILE_VALUE=Caddyfile
+  elif valid_ipv4 "$candidate"; then
+    SITE_ADDRESS_VALUE="$candidate"; COOKIE_SECURE_VALUE=true; CADDYFILE_VALUE=Caddyfile.ip
+  elif [[ "$candidate" == 'localhost' ]]; then
+    SITE_ADDRESS_VALUE="http://localhost"; COOKIE_SECURE_VALUE=false; CADDYFILE_VALUE=Caddyfile
+  else
+    SITE_ADDRESS_VALUE="$candidate"; COOKIE_SECURE_VALUE=true; CADDYFILE_VALUE=Caddyfile
   fi
 }
 
@@ -154,16 +196,17 @@ configure_app() {
   local input setup_token
   if [[ -f "$ENV_FILE" ]]; then
     printf "\n%bИзменение адреса%b\n" "$BOLD" "$RESET"
-    input="$(prompt_tty 'Новый домен или публичный IPv4' "$(env_value SITE_ADDRESS)")"
+    input="$(resolve_site_input "$(env_value SITE_ADDRESS)")"
     parse_site "$input"
     setup_token="$(env_value SETUP_TOKEN)"
     [[ -n "$setup_token" ]] || die "В существующем .env отсутствует SETUP_TOKEN."
   else
     FIRST_INSTALL=true
     printf "\n%bПервоначальная настройка%b\n" "$BOLD" "$RESET"
-    printf "Укажите домен с A-записью на Azure VM. Без домена можно ввести IPv4, но соединение будет без HTTPS.\n\n"
-    input="$(prompt_tty 'Домен или публичный IPv4')"
+    printf "Укажите домен или публичный IPv4 Azure VM. Для IPv4 Caddy автоматически запросит короткоживущий доверенный HTTPS-сертификат.\n\n"
+    input="$(resolve_site_input)"
     parse_site "$input"
+    if [[ "${TRENYROVKA_AUTO_IP:-0}" == '1' ]]; then info "Определён публичный IPv4: ${SITE_ADDRESS_VALUE}"; fi
     setup_token="$(openssl rand -hex 32)"
   fi
 
@@ -180,6 +223,7 @@ COOKIE_SECURE=${COOKIE_SECURE_VALUE}
 TRUST_PROXY=true
 LOG_LEVEL=info
 SITE_ADDRESS=${SITE_ADDRESS_VALUE}
+CADDYFILE=${CADDYFILE_VALUE}
 EOF
   chmod 600 "$ENV_FILE"
   info "Конфигурация сохранена с правами 0600"
@@ -272,7 +316,13 @@ print_result() {
   printf "Сайт: %b%s%b\n" "$GREEN" "$site" "$RESET"
   if [[ "$FIRST_INSTALL" == true ]]; then printf "Setup-токен: %b%s%b\nОткройте сайт, вставьте токен и создайте пароль.\n" "$BOLD" "$setup_token" "$RESET"; fi
   printf "\nВажно для Azure: в Network Security Group должны быть входящие TCP 80 и 443.\n"
-  if [[ "$site" == http://* ]]; then warn "HTTP не защищает пароль в публичной сети. Подключите домен и повторите с TRENYROVKA_RECONFIGURE=1."; else printf "Caddy автоматически выпустит HTTPS-сертификат, когда DNS и порты доступны.\n"; fi
+  if [[ "$site" == http://* ]]; then
+    warn "HTTP выбран явно. Для автоматического HTTPS по публичному IPv4 повторите с TRENYROVKA_AUTO_IP=1 и TRENYROVKA_RECONFIGURE=1."
+  elif [[ "$(env_value CADDYFILE)" == 'Caddyfile.ip' ]]; then
+    printf "Caddy запросит у Let's Encrypt доверенный 6-дневный IP-сертификат и будет автоматически его обновлять.\n"
+  else
+    printf "Caddy автоматически выпустит HTTPS-сертификат, когда DNS и порты доступны.\n"
+  fi
   printf "\nКоманды:\n  cd %s && sudo docker compose ps\n  cd %s && sudo docker compose logs -f --tail=100\n  sudo systemctl list-timers trenyrovka-backup.timer\n" "$INSTALL_DIR" "$INSTALL_DIR"
 }
 

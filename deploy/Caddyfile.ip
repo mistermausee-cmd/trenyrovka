@@ -1,0 +1,38 @@
+{
+	# Browsers can omit SNI when connecting directly to an IP. Caddy then uses
+	# the public IPv4 explicitly rather than its private Docker address.
+	default_sni {$SITE_ADDRESS}
+}
+
+{$SITE_ADDRESS} {
+	tls {
+		issuer acme {
+			# Let's Encrypt requires its six-day profile for IP certificates.
+			profile shortlived
+		}
+	}
+
+	encode zstd gzip
+
+	reverse_proxy app:3000 {
+		health_uri /api/health
+		health_interval 30s
+		health_timeout 5s
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
+
+http://:8080 {
+	reverse_proxy app:3000
+}

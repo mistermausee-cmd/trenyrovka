@@ -22,45 +22,51 @@
 
 ### 1. Подготовьте Azure
 
-1. Если есть домен, создайте `A`-запись на публичный IPv4 VM. Домен настоятельно рекомендуется для HTTPS.
-2. В Azure Portal откройте **VM → Networking → Network settings → Inbound port rules**.
-3. Разрешите TCP `80` и `443`. SSH `22` лучше ограничить своим IP.
+В Azure Portal откройте **VM → Networking → Network settings → Inbound port rules** и разрешите входящие TCP `80` и `443`. SSH `22` лучше ограничить своим IP. Публичный IPv4 VM должен быть статическим.
 
-### 2. Запустите установщик
+### 2. Автоматическая установка без домена
 
-Репозиторий сейчас приватный. Создайте fine-grained GitHub token только с правом **Contents: Read-only** для этого репозитория. Команда спросит его скрыто — токен не попадёт в историю shell и не сохранится на сервере:
+После публикации репозитория вставьте один блок. Он автоматически получит публичный IPv4 через Azure Instance Metadata Service (с резервной проверкой внешнего адреса), не задаст вопросов и включит доверенный HTTPS прямо для IP:
 
 ```bash
-read -rsp "GitHub token: " GITHUB_TOKEN && echo && \
-export GITHUB_TOKEN && \
-export TRENYROVKA_BRANCH='feat/personal-training-tracker' && \
-curl -fsSL \
-  -H "Authorization: Bearer $GITHUB_TOKEN" \
-  -H "Accept: application/vnd.github.raw+json" \
-  "https://api.github.com/repos/mistermausee-cmd/trenyrovka/contents/deploy/install.sh?ref=feat%2Fpersonal-training-tracker" \
-| sudo --preserve-env=GITHUB_TOKEN,TRENYROVKA_BRANCH bash
+sudo apt-get update -qq && \
+sudo apt-get install -y -qq curl ca-certificates && \
+bash -o pipefail -c '
+  curl -fsSL \
+    -H "Accept: application/vnd.github.raw+json" \
+    "https://api.github.com/repos/mistermausee-cmd/trenyrovka/contents/deploy/install.sh?ref=feat%2Fpersonal-training-tracker" \
+  | sudo env \
+      TRENYROVKA_BRANCH="feat/personal-training-tracker" \
+      TRENYROVKA_AUTO_IP=1 \
+      TRENYROVKA_RECONFIGURE=1 \
+      bash
+'
 ```
 
 Установщик:
 
 1. установит Docker Engine и Compose из официального apt-репозитория;
 2. скачает приложение в `/opt/trenyrovka`;
-3. спросит домен или публичный IPv4;
-4. создаст случайный setup-токен и покажет его в конце;
-5. соберёт контейнеры, запустит health check и ежедневный backup timer.
+3. автоматически определит публичный IPv4;
+4. настроит Caddy 2.11 с короткоживущим IP-сертификатом Let's Encrypt;
+5. создаст случайный setup-токен и покажет его в конце;
+6. соберёт контейнеры, проверит приложение и reverse proxy, включит ежедневные копии.
 
-Откройте показанный URL, вставьте setup-токен и создайте пароль длиной не менее 10 символов.
+Откройте показанный URL вида `https://203.0.113.10`, вставьте setup-токен и создайте пароль длиной не менее 10 символов. Первый сертификат может выпускаться несколько десятков секунд. Let's Encrypt выдаёт IP-сертификат примерно на 6 дней, а Caddy автоматически обновляет его задолго до истечения.
 
-> Если сделать репозиторий публичным, PAT не нужен. Код не содержит тренировочных данных или секретов — они создаются только на сервере и исключены из Git.
-
-Публичная команда для текущей ветки:
+Если Azure metadata возвращает не тот адрес (например, VM работает через отдельный NAT Gateway), передайте IP явно:
 
 ```bash
-export TRENYROVKA_BRANCH='feat/personal-training-tracker'; \
-curl -fsSL \
-  -H "Accept: application/vnd.github.raw+json" \
-  "https://api.github.com/repos/mistermausee-cmd/trenyrovka/contents/deploy/install.sh?ref=feat%2Fpersonal-training-tracker" \
-| sudo --preserve-env=TRENYROVKA_BRANCH bash
+bash -o pipefail -c '
+  curl -fsSL \
+    -H "Accept: application/vnd.github.raw+json" \
+    "https://api.github.com/repos/mistermausee-cmd/trenyrovka/contents/deploy/install.sh?ref=feat%2Fpersonal-training-tracker" \
+  | sudo env \
+      TRENYROVKA_BRANCH="feat/personal-training-tracker" \
+      TRENYROVKA_SITE_ADDRESS="203.0.113.10" \
+      TRENYROVKA_RECONFIGURE=1 \
+      bash
+'
 ```
 
 После переноса кода в `main` переменная `TRENYROVKA_BRANCH` не нужна.
@@ -132,7 +138,7 @@ npm start
 - приложение работает непривилегированным пользователем и с read-only root filesystem;
 - экспорт для тренера исключает пароли, сессии и setup-токен.
 
-При установке по одному IP Caddy намеренно использует HTTP. Не вводите пароль через недоверенную сеть; подключите домен, VPN или Tailscale.
+При установке на публичный статический IPv4 Caddy использует общедоступный короткоживущий IP-сертификат Let's Encrypt. Порты `80` и `443` должны оставаться доступными для автоматического перевыпуска; не используйте динамический адрес, который может смениться.
 
 ## Источники решений
 
@@ -140,7 +146,8 @@ npm start
 - [WHO physical activity guidance](https://www.who.int/news-room/fact-sheets/detail/physical-activity) — общие ориентиры активности.
 - [ACE Exercise Library](https://www.acefitness.org/resources/everyone/exercise-library/) и [NHS Strength Exercises](https://www.nhs.uk/live-well/exercise/strength-exercises/) — проверка техники и безопасных вариантов.
 - [Docker Engine for Ubuntu](https://docs.docker.com/engine/install/ubuntu/) — официальный apt-способ установки.
-- [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https) — требования DNS, портов и постоянного data volume.
+- [Let's Encrypt: IP Address Certificates GA](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability) — доверенные IPv4/IPv6-сертификаты и обязательный профиль `shortlived`.
+- [Caddy automatic HTTPS](https://caddyserver.com/docs/automatic-https) — автоматическая выдача, обновление и постоянное хранилище сертификатов.
 
 ## Медицинская оговорка
 

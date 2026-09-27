@@ -29,7 +29,7 @@
 ```text
 Browser / PWA
     |
-    | HTTPS (или HTTP только для локального IP)
+    | HTTPS: доменный сертификат либо 6-дневный Let's Encrypt IP-сертификат
     v
 Caddy :80/:443
     |
